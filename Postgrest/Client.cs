@@ -51,7 +51,7 @@ namespace Supabase.Postgrest
 
         /// <inheritdoc />
         public void RemoveRequestPreparedHandler(OnRequestPreparedEventHandler handler) =>
-            Hooks.Instance.AddRequestPreparedHandler(handler);
+            Hooks.Instance.RemoveRequestPreparedHandler(handler);
 
         /// <inheritdoc />
         public void ClearRequestPreparedHandlers() =>

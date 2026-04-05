@@ -1228,20 +1228,71 @@ namespace PostgrestTests
             timer1.Start();
             timer2.Start();
 
-            client.AddRequestPreparedHandler((_, _, _, _, _, _, _) =>
+            client.ClearRequestPreparedHandlers();
+
+            try
             {
-                timer1.Stop();
-                tsc.TrySetResult(true);
-            });
+                client.AddRequestPreparedHandler((_, _, _, _, _, _, _) =>
+                {
+                    timer1.Stop();
+                    tsc.TrySetResult(true);
+                });
 
-            var request = client.Table<Movie>();
+                var request = client.Table<Movie>();
 
-            await request.Get();
-            timer2.Stop();
+                try
+                {
+                    await request.Get();
+                }
+                catch (HttpRequestException)
+                {
+                    // The hook fires before transport, so connection refusal should not fail this hook test.
+                }
 
-            await tsc.Task;
+                timer2.Stop();
 
-            Assert.IsTrue(timer1.ElapsedTicks < timer2.ElapsedTicks);
+                var completedTask = await Task.WhenAny(tsc.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+
+                Assert.AreEqual(tsc.Task, completedTask);
+
+                Assert.IsTrue(timer1.ElapsedTicks < timer2.ElapsedTicks);
+            }
+            finally
+            {
+                client.ClearRequestPreparedHandlers();
+            }
+        }
+
+        [TestMethod("OnRequestPrepared handler can be removed.")]
+        public async Task TestOnRequestPreparedHandlerRemoval()
+        {
+            var client = new Client(BaseUrl);
+            var callCount = 0;
+
+            OnRequestPreparedEventHandler handler = (_, _, _, _, _, _, _) => callCount++;
+
+            client.ClearRequestPreparedHandlers();
+
+            try
+            {
+                client.AddRequestPreparedHandler(handler);
+                client.RemoveRequestPreparedHandler(handler);
+
+                try
+                {
+                    await client.Table<Movie>().Get();
+                }
+                catch (HttpRequestException)
+                {
+                    // The handler list is evaluated before the HTTP request is sent.
+                }
+
+                Assert.AreEqual(0, callCount);
+            }
+            finally
+            {
+                client.ClearRequestPreparedHandlers();
+            }
         }
     }
 }
