@@ -7,6 +7,8 @@ using System.Runtime.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Supabase.Postgrest;
 using Supabase.Postgrest.Exceptions;
 using Supabase.Postgrest.Interfaces;
@@ -1293,6 +1295,226 @@ namespace PostgrestTests
             {
                 client.ClearRequestPreparedHandlers();
             }
+        }
+    }
+
+    [TestClass]
+    [DoNotParallelize]
+    public class InsertUpsertEnumSerializationTests
+    {
+        private const string BaseUrl = "http://localhost:54321/rest/v1";
+
+        private sealed class PreparedRequestCapture
+        {
+            public object? Data { get; init; }
+            public JsonSerializerSettings? SerializerSettings { get; init; }
+        }
+
+        private static Dictionary<string, object> AssertPreparedDictionary(PreparedRequestCapture capture)
+        {
+            Assert.IsNotNull(capture.Data);
+            Assert.IsInstanceOfType(capture.Data, typeof(Dictionary<string, object>));
+            return (Dictionary<string, object>)capture.Data;
+        }
+
+        private static List<object> AssertPreparedList(PreparedRequestCapture capture)
+        {
+            Assert.IsNotNull(capture.Data);
+            Assert.IsInstanceOfType(capture.Data, typeof(List<object>));
+            return (List<object>)capture.Data;
+        }
+
+        private static string AssertPreparedString(Dictionary<string, object> preparedData, string key)
+        {
+            Assert.IsTrue(preparedData.ContainsKey(key));
+            Assert.IsInstanceOfType(preparedData[key], typeof(string));
+            return (string)preparedData[key];
+        }
+
+        private static JObject SerializePreparedDictionary(Dictionary<string, object> preparedData,
+            JsonSerializerSettings serializerSettings)
+        {
+            var serialized = JsonConvert.SerializeObject(preparedData, serializerSettings);
+            return JObject.Parse(serialized);
+        }
+
+        private static JArray SerializePreparedList(List<object> preparedData, JsonSerializerSettings serializerSettings)
+        {
+            var serialized = JsonConvert.SerializeObject(preparedData, serializerSettings);
+            return JArray.Parse(serialized);
+        }
+
+        private static async Task<PreparedRequestCapture> CapturePreparedDataAsync(Func<Client, Task> requestAction)
+        {
+            var client = new Client(BaseUrl);
+            var handlerCalled = false;
+            PreparedRequestCapture? capture = null;
+
+            client.ClearRequestPreparedHandlers();
+
+            try
+            {
+                client.AddRequestPreparedHandler((_, _, _, _, serializerSettings, data, _) =>
+                {
+                    handlerCalled = true;
+                    capture = new PreparedRequestCapture
+                    {
+                        Data = data,
+                        SerializerSettings = serializerSettings
+                    };
+                });
+
+                try
+                {
+                    await requestAction(client);
+                }
+                catch (Exception e) when (e is HttpRequestException or PostgrestException)
+                {
+                    // The hook fires before transport, so transport or auth failures should not fail this hook test.
+                }
+
+                Assert.IsTrue(handlerCalled);
+                Assert.IsNotNull(capture);
+                Assert.IsNotNull(capture.SerializerSettings);
+                return capture;
+            }
+            finally
+            {
+                client.ClearRequestPreparedHandlers();
+            }
+        }
+
+        [TestMethod("insert: enum-type JsonConverter keeps string payload")]
+        public async Task TestInsertEnumJsonConverterRepro()
+        {
+            var todo = new Todo
+            {
+                Id = 999_001,
+                UserId = 123,
+                Name = "enum-repro",
+                Status = Todo.TodoStatus.IN_PROGRESS
+            };
+            var capture = await CapturePreparedDataAsync(client => client.Table<Todo>().Insert(todo));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual("IN PROGRESS", AssertPreparedString(preparedData, "status"));
+            Assert.AreEqual("IN PROGRESS", serialized["status"]?.Value<string>());
+        }
+
+        [TestMethod("insert: property-level enum JsonConverter keeps string payload")]
+        public async Task TestInsertPropertyLevelEnumJsonConverterRepro()
+        {
+            var door = new DoorWithPropertyConverter
+            {
+                Id = Guid.NewGuid(),
+                Status = DoorStatus.Closed
+            };
+            var capture = await CapturePreparedDataAsync(client => client.Table<DoorWithPropertyConverter>().Insert(door));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual("Closed", AssertPreparedString(preparedData, "status"));
+            Assert.AreEqual("Closed", serialized["status"]?.Value<string>());
+        }
+
+        [TestMethod("upsert: property-level enum JsonConverter keeps string payload")]
+        public async Task TestUpsertPropertyLevelEnumJsonConverterRepro()
+        {
+            var door = new DoorWithPropertyConverter
+            {
+                Id = Guid.NewGuid(),
+                Status = DoorStatus.Closed
+            };
+            var capture = await CapturePreparedDataAsync(client =>
+                client.Table<DoorWithPropertyConverter>().Insert(door, new QueryOptions { Upsert = true }));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual("Closed", AssertPreparedString(preparedData, "status"));
+            Assert.AreEqual("Closed", serialized["status"]?.Value<string>());
+        }
+
+        [TestMethod("insert: bulk property-level enum JsonConverter keeps string payload")]
+        public async Task TestBulkInsertPropertyLevelEnumJsonConverterRepro()
+        {
+            var doors = new List<DoorWithPropertyConverter>
+            {
+                new() { Id = Guid.NewGuid(), Status = DoorStatus.Open },
+                new() { Id = Guid.NewGuid(), Status = DoorStatus.Closed }
+            };
+            var capture = await CapturePreparedDataAsync(client =>
+                client.Table<DoorWithPropertyConverter>().Insert(doors));
+            var preparedData = AssertPreparedList(capture);
+            var serialized = SerializePreparedList(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual(2, preparedData.Count);
+            Assert.AreEqual("Open", serialized[0]?["status"]?.Value<string>());
+            Assert.AreEqual("Closed", serialized[1]?["status"]?.Value<string>());
+        }
+
+        [TestMethod("insert: nullable property-level enum JsonConverter keeps null payload")]
+        public async Task TestInsertNullablePropertyLevelEnumJsonConverterRepro()
+        {
+            var door = new NullableDoorWithPropertyConverter
+            {
+                Id = Guid.NewGuid(),
+                Status = null
+            };
+            var capture = await CapturePreparedDataAsync(client =>
+                client.Table<NullableDoorWithPropertyConverter>().Insert(door));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.IsTrue(preparedData.ContainsKey("status"));
+            Assert.IsNull(preparedData["status"]);
+            Assert.AreEqual(JTokenType.Null, serialized["status"]?.Type);
+        }
+
+        [TestMethod("insert: property-level enum converter respects ignore rules")]
+        public async Task TestInsertPropertyLevelEnumConverterRespectsIgnoreRules()
+        {
+            var model = new DoorWithIgnoredFields
+            {
+                Id = Guid.NewGuid(),
+                Status = DoorStatus.Open,
+                IgnoreOnInsert = "ignore-insert",
+                IgnoreOnUpdate = "ignore-update",
+                Name = "front-door"
+            };
+            var capture = await CapturePreparedDataAsync(client =>
+                client.Table<DoorWithIgnoredFields>().Insert(model));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual("Open", AssertPreparedString(preparedData, "status"));
+            Assert.IsFalse(preparedData.ContainsKey("ignore_on_insert"));
+            Assert.AreEqual("ignore-update", AssertPreparedString(preparedData, "ignore_on_update"));
+            Assert.AreEqual("front-door", AssertPreparedString(preparedData, "name"));
+            Assert.AreEqual("Open", serialized["status"]?.Value<string>());
+        }
+
+        [TestMethod("upsert: property-level enum converter respects ignore rules")]
+        public async Task TestUpsertPropertyLevelEnumConverterRespectsIgnoreRules()
+        {
+            var model = new DoorWithIgnoredFields
+            {
+                Id = Guid.NewGuid(),
+                Status = DoorStatus.Closed,
+                IgnoreOnInsert = "ignore-insert",
+                IgnoreOnUpdate = "ignore-update",
+                Name = "garage"
+            };
+            var capture = await CapturePreparedDataAsync(client =>
+                client.Table<DoorWithIgnoredFields>().Insert(model, new QueryOptions { Upsert = true }));
+            var preparedData = AssertPreparedDictionary(capture);
+            var serialized = SerializePreparedDictionary(preparedData, capture.SerializerSettings!);
+
+            Assert.AreEqual("Closed", AssertPreparedString(preparedData, "status"));
+            Assert.IsFalse(preparedData.ContainsKey("ignore_on_insert"));
+            Assert.IsFalse(preparedData.ContainsKey("ignore_on_update"));
+            Assert.AreEqual("garage", AssertPreparedString(preparedData, "name"));
+            Assert.AreEqual("Closed", serialized["status"]?.Value<string>());
         }
     }
 }
