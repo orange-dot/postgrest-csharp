@@ -9,7 +9,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 using Newtonsoft.Json;
 using Supabase.Postgrest.Extensions;
 using Supabase.Core.Attributes;
@@ -659,7 +658,7 @@ namespace Supabase.Postgrest
         public string GenerateUrl()
         {
             var builder = new UriBuilder($"{BaseUrl}/{TableName}");
-            var query = HttpUtility.ParseQueryString(builder.Query);
+            var query = QueryStringCollection.Parse(builder.Query);
 
             foreach (var param in _options.QueryParams)
                 query.Add(param.Key, param.Value);

@@ -5,7 +5,6 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Supabase.Core;
@@ -60,7 +59,7 @@ namespace Supabase.Postgrest
 			Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
 		{
 			var builder = new UriBuilder(url);
-			var query = HttpUtility.ParseQueryString(builder.Query);
+			var query = QueryStringCollection.Parse(builder.Query);
 
 			if (data != null && method == HttpMethod.Get)
 			{
